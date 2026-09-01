@@ -368,9 +368,9 @@ h2 small{font-weight:400;font-size:.72rem;color:#98a1ab;letter-spacing:0}
 .barrow .track{flex:1;height:8px;background:#f0f2f4;border-radius:999px;overflow:hidden}
 .bar{display:block;height:100%;background:#d64545;border-radius:999px;min-width:2px}
 .barrow .num{min-width:3.5em;text-align:right;font-variant-numeric:tabular-nums;color:#23272e;flex-shrink:0}
-.tablewrap{background:#fff;border:1px solid #e6e8eb;border-radius:10px;box-shadow:0 1px 2px rgba(16,24,40,.04);overflow:hidden}
-table{border-collapse:collapse;width:100%}
-th,td{padding:.5rem .8rem;text-align:left;border-bottom:1px solid #f1f3f5;font-size:.78rem;word-break:break-all;vertical-align:top}
+.tablewrap{background:#fff;border:1px solid #e6e8eb;border-radius:10px;box-shadow:0 1px 2px rgba(16,24,40,.04);overflow-x:auto}
+table{border-collapse:collapse;width:100%;min-width:720px}
+th,td{padding:.5rem .8rem;text-align:left;border-bottom:1px solid #f1f3f5;font-size:.78rem;white-space:nowrap;vertical-align:top}
 th{color:#8a919c;font-weight:600;font-size:.72rem;background:#fafbfc;letter-spacing:.03em}
 tbody tr:last-child td{border-bottom:none}
 tbody tr:hover td{background:#fafbfc}
@@ -414,7 +414,7 @@ footer{margin-top:2rem;padding-top:1rem;border-top:1px solid #e6e8eb;color:#98a1
 </table>
 </div>
 
-<footer id="foot">数据每 30 秒自动刷新</footer>
+<footer id="foot">OpenLiteStats</footer>
 
 <noscript><p class="noscript">此页面需要启用 JavaScript 才能展示统计数据。</p></noscript>
 
@@ -483,7 +483,7 @@ function fetchData(){
     el("st-areq").textContent=j.alltime.req;
     el("st-abytes").textContent=fmtBytes(j.alltime.bytes||0);
     el("st-rate").textContent=(j.today.req/1440).toFixed(1);
-    el("foot").textContent="OpenLiteStats v"+j.version+" · 统计日期 "+j.date+" · 数据每 30 秒自动刷新";
+    el("foot").textContent="OpenLiteStats v"+j.version+" · 统计日期 "+j.date;
     drawTrend(j.hours);
     drawTops("endpoints",j.tops.endpoints);
     drawTops("referers",j.tops.referers);
@@ -528,9 +528,10 @@ function _M.view()
         return
     end
 
-    -- HTML 输出：/stats（数据 URI 经占位符注入，避免硬编码前缀）
+    -- HTML 输出：/stats（数据 URI 经占位符注入，避免硬编码前缀）；
+    -- gsub 有两个返回值，括号确保只传替换后的字符串（否则替换次数会被拼进页面）
     ngx.header.content_type = "text/html; charset=utf-8"
-    ngx.say(VIEW_HTML:gsub("REPLACE_VIEW_DATA_URI", CONFIG.data_prefix))
+    ngx.say((VIEW_HTML:gsub("REPLACE_VIEW_DATA_URI", CONFIG.data_prefix)))
 end
 
 return _M

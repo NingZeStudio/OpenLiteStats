@@ -207,7 +207,7 @@ ngx = {
     var = {},
     ctx = {},
     header = {},
-    say = function(b) SAID = b end,
+    say = function(...) SAID = table.concat({ ... }) end,
 }
 
 package.loaded["cjson.safe"] = {
@@ -329,6 +329,7 @@ js = stats_json("/stats")
 ok(js and js:find("OpenLiteStats 访问统计", 1, true) ~= nil, "HTML 统计页输出")
 ok(js and js:find("/stats/data", 1, true) ~= nil, "HTML 注入数据端点 URI")
 ok(js and js:find("REPLACE_VIEW_DATA_URI", 1, true) == nil, "占位符已替换")
+ok(js and js:match("</html>%s*$") ~= nil, "HTML 输出无多余尾巴（gsub 次数不外泄）")
 
 -- T10 log.lua 门控：被 WAF 拦截的请求不记录
 do

@@ -268,14 +268,22 @@ ok(js and js:find('"unique_ips":3', 1, true) ~= nil, "独立 IP 去重（位图�
 -- T4 脱敏：IP 与 Referer host
 request({
     uri = "/x", ip = "192.168.55.77",
-    ref = "https://example.com/page?token=secret",
+    ref = "https://user:password@example.com/page?token=secret",
     ua = "TestBot/1.0",
 })
 js = stats_json("/stats/data")
 ok(js and js:find("192.168.*.*", 1, true) ~= nil
     and js:find("192.168.55.77", 1, true) == nil, "日志 IP 已脱敏")
 ok(js and js:find("example.com", 1, true) ~= nil
-    and js:find("token=secret", 1, true) == nil, "Referer 仅保留 host")
+    and js:find("token=secret", 1, true) == nil
+    and js:find("user:password", 1, true) == nil, "Referer 仅保留 host 并剥离 Basic Auth 凭据")
+
+-- T4.1 IPv6 脱敏与 Referer Basic Auth 细粒度单元测试
+ok(mod._mask_ip("::1") == "0:0:0::*", "IPv6 压缩回环 ::1 展开脱敏")
+ok(mod._mask_ip("fe80::1") == "fe80:0:0::*", "IPv6 压缩地址 fe80::1 展开脱敏")
+ok(mod._mask_ip("2001:db8::1") == "2001:db8:0::*", "IPv6 压缩地址 2001:db8::1 展开脱敏")
+ok(mod._mask_ip("2001:0db8:85a3:0000:0000:8a2e:0370:7334") == "2001:0db8:85a3::*", "IPv6 完整地址脱敏")
+ok(mod._referer_host("https://user:pass@secret.domain.com/path?foo=bar") == "secret.domain.com", "Referer 剥离 Basic Auth 凭据")
 
 -- T5 跨日滚动：今日清零、累计保留、位图重置
 TODAY = "2026-09-02"

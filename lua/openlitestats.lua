@@ -46,25 +46,52 @@ end
 local function mask_ip(ip)
     if not ip or ip == "" then return "-" end
     if ip:find(":", 1, true) then
-        local groups = {}
-        for g in ip:gmatch("[^:]+") do
-            groups[#groups + 1] = g
-            if #groups == 3 then break end
+        local left, right = ip:match("^(.-)::(.*)$")
+        local top = {}
+        if left then
+            for g in left:gmatch("[0-9a-fA-F]+") do
+                top[#top + 1] = g
+                if #top == 3 then break end
+            end
+            if #top < 3 then
+                local right_groups = {}
+                for g in right:gmatch("[0-9a-fA-F]+") do
+                    right_groups[#right_groups + 1] = g
+                end
+                local zeros = 8 - #top - #right_groups
+                while #top < 3 and zeros > 0 do
+                    top[#top + 1] = "0"
+                    zeros = zeros - 1
+                end
+                local r_idx = 1
+                while #top < 3 and r_idx <= #right_groups do
+                    top[#top + 1] = right_groups[r_idx]
+                    r_idx = r_idx + 1
+                end
+            end
+        else
+            for g in ip:gmatch("[0-9a-fA-F]+") do
+                top[#top + 1] = g
+                if #top == 3 then break end
+            end
         end
-        return table.concat(groups, ":") .. ":*:*"
+        while #top < 3 do
+            top[#top + 1] = "0"
+        end
+        return table.concat(top, ":") .. "::*"
     end
     local a, b = ip:match("^(%d+%.%d+)%.%d+%.%d+$")
     if a then return a .. ".*.*" end
     return "*"
 end
 
--- Referer 只保留 host（query 可能含 token 等敏感参数）
+-- Referer 只保留 host（query 可能含 token 等敏感参数，且剥离 Basic Auth 凭据）
 local function referer_host(ref)
     if not ref or ref == "" then return "-" end
     local host = ref:gsub("^%w+://", "")
     host = host:gsub("^//", "")
     host = host:match("^([^/]*)")
-    host = host:match("^(.*@?)") or host
+    host = host:gsub("^[^@]+@", "")
     if host == "" then return "-" end
     return host:sub(1, CONFIG.referer_field_max)
 end
@@ -533,5 +560,8 @@ function _M.view()
     ngx.header.content_type = "text/html; charset=utf-8"
     ngx.say((VIEW_HTML:gsub("REPLACE_VIEW_DATA_URI", CONFIG.data_prefix)))
 end
+
+_M._mask_ip = mask_ip
+_M._referer_host = referer_host
 
 return _M

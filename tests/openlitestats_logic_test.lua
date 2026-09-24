@@ -339,6 +339,61 @@ ok(js and js:find("/stats/data", 1, true) ~= nil, "HTML 注入数据端点 URI")
 ok(js and js:find("REPLACE_VIEW_DATA_URI", 1, true) == nil, "占位符已替换")
 ok(js and js:match("</html>%s*$") ~= nil, "HTML 输出无多余尾巴（gsub 次数不外泄）")
 
+-- T11 排除口径：遥测上报与管理后台不计入（v1.1.0），且排除不得成为前缀黑洞
+do
+    fresh()
+    local d = request({ uri = "/v1/log" })
+    local bm_before = d:get("u:bm")
+    local seq_before = d:get("seq")
+    request({ uri = "/v1/telemetry/report", ip = "7.7.1.1" })
+    request({ uri = "/1/telemetry/report", ip = "7.7.2.2" })
+    request({ uri = "/v1/admin/logs", ip = "7.7.3.3" })
+    request({ uri = "/1/admin/rag/docs/save", ip = "7.7.4.4" })
+    ok(d:get("a:req") == 1, "遥测与 admin 前缀不计数")
+    ok(d:get("seq") == seq_before, "遥测与 admin 不进环形缓冲（不污染热门端点与最近请求）")
+    ok(d:get("u:bm") == bm_before, "遥测客户端的海量来源 IP 不撑高独立 IP 数")
+
+    -- 反例：相似但非路径段的字符串必须照常计入
+    request({ uri = "/securityXYZ" })
+    request({ uri = "/statsXYZ" })
+    request({ uri = "/v1/administrator" })
+    request({ uri = "/v1/telemetryx" })
+    ok(d:get("a:req") == 5, "相似前缀不构成排除（按路径段边界判定）")
+
+    -- CORS 预检不是访问行为（应用层中间件直接短路应答，不进业务）
+    request({ uri = "/v1/log", method = "OPTIONS" })
+    ok(d:get("a:req") == 5, "OPTIONS 预检不计数")
+
+    -- 空前缀守卫：列表里混入空串不得静默停掉全站统计
+    local keep = mod.CONFIG.exclude_prefixes
+    mod.CONFIG.exclude_prefixes = { "" }
+    request({ uri = "/v1/log" })
+    ok(d:get("a:req") == 6, "空前缀不会把全站流量排除掉")
+    mod.CONFIG.exclude_prefixes = keep
+end
+
+-- T12 热门端点路径模板化：带实例 ID 的路径折叠为同一键，最近请求保留原始路径
+do
+    fresh()
+    ok(mod._normalize_endpoint("/v1/raw/s123456/main.log") == "/v1/raw/:id/main.log", "ID 段归一为 :id")
+    ok(mod._normalize_endpoint("/v1/ai/qKSA1QU") == "/v1/ai/:id", "末段裸 ID 归一")
+    ok(mod._normalize_endpoint("/v1/admin/ai/analyses/2b8f1c3d4e5f6a7b")
+        == "/v1/admin/ai/analyses/:hash", "长十六进制段归一为 :hash")
+    ok(mod._normalize_endpoint("/v1/log") == "/v1/log", "常规路径不变")
+    ok(mod._normalize_endpoint("/v1/admin/ai/tools/grep_log_file/enable")
+        == "/v1/admin/ai/tools/grep_log_file/enable", "长英文词段不被误折叠")
+    ok(mod._normalize_endpoint("") == "/", "空路径归一为根")
+    request({ uri = "/v1/raw/s123456/main.log" })
+    request({ uri = "/v1/raw/fAb12cd/main.log" })
+    local js2 = stats_json("/stats/data")
+    ok(js2 and js2:find("/v1/raw/:id/main.log", 1, true) ~= nil, "Top 以模板为键（实例变体不再打散计数）")
+    ok(js2 and js2:find("s123456", 1, true) ~= nil, "最近请求仍保留原始路径便于排查")
+    -- 线上样本里出现过 {"k":""}：空串键不得参与 Top 聚合
+    ngx.shared.openlitestats:set("ring:0", '{"t":1,"m":"GET","u":"","b":1,"r":"-","a":"-","ip":"1.2.*.*"}')
+    js2 = stats_json("/stats/data")
+    ok(js2 and js2:find('"k":""', 1, true) == nil, "空串路径不进入 Top 聚合")
+end
+
 -- T10 log.lua 门控：被 WAF 拦截的请求不记录
 do
     fresh()

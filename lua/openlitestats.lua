@@ -1,10 +1,12 @@
 -- OpenLiteStats — 极简站点访问统计（OpenResty Lua）
 -- 记录通过 WAF 的正常请求：请求 / 流量 / 独立 IP（位图近似）/ 按小时趋势；
 -- 热门端点、来源（Referer host）、User-Agent、最近请求基于环形缓冲在展示时聚合。
+-- 不计入统计：统计页与 /security 自身、遥测上报（/v1|/1/telemetry）、管理后台
+-- （/v1|/1/admin）、CORS 预检（OPTIONS）；被 WAF 拦截的请求由 log.lua 排除。
 -- 状态保存在 lua_shared_dict，定时快照到挂载目录实现持久化（重启恢复），
 -- 目录不可写时自动退化为纯内存模式。文档见 OpenLiteStats/README.md。
 
-local _M = { _VERSION = "1.0.0" }
+local _M = { _VERSION = "1.1.0" }
 
 local cjson = require "cjson.safe"
 
@@ -12,10 +14,22 @@ local cjson = require "cjson.safe"
 local CONFIG = {
     -- shared dict 名称，须与 nginx.conf 中 lua_shared_dict 一致
     dict_name = "openlitestats",
-    -- 统计页 URI（HTML 前缀 / JSON 前缀）；这两个前缀与 /security 不计入统计
+    -- 统计页 URI（HTML 前缀 / JSON 前缀）
     view_prefix = "/stats",
     data_prefix = "/stats/data",
-    exclude_prefixes = { "/security", "/stats" },
+    -- 不计入统计的前缀（带路径段边界，见 excluded）：
+    --   /security、/stats      两套统计页自身，避免自引用污染热门端点
+    --   /v1|/1/telemetry       前端与启动器的性能/错误遥测上报，是机器流量而非访问行为，
+    --                          且量级占半数以上，还会用海量客户端 IP 撑高独立 IP 数
+    --   /v1|/1/admin           管理后台轮询（80 余个子路径），属运维流量不该进站点榜单
+    exclude_prefixes = {
+        "/security",
+        "/stats",
+        "/v1/telemetry",
+        "/1/telemetry",
+        "/v1/admin",
+        "/1/admin",
+    },
     -- 快照持久化目录（容器内）；不可写时退化为纯内存模式
     data_dir = "/data/openlitestats",
     snapshot_interval = 60,
@@ -116,14 +130,47 @@ local function linear_count(bm)
 end
 
 local function starts_with(s, prefix)
-    return s ~= nil and s:sub(1, #prefix) == prefix
+    -- 空前缀守卫：一旦 exclude_prefixes 里混进空串（例如将来改从配置读取），
+    -- "" 会匹配所有 URI，统计将静默归零
+    return prefix ~= nil and prefix ~= "" and s ~= nil and s:sub(1, #prefix) == prefix
 end
 
+-- 带路径段边界的前缀匹配：/security/stats 与 /v1/admin/logs 排除，
+-- /securityXYZ、/v1/administrator 不排除（口径与 OpenLiteWaf 的精确匹配约定对齐）
 local function excluded(uri)
     for _, p in ipairs(CONFIG.exclude_prefixes) do
-        if starts_with(uri, p) then return true end
+        if starts_with(uri, p) and (uri == p or uri:sub(#p + 1, #p + 1) == "/") then
+            return true
+        end
     end
     return false
+end
+
+-- 热门端点的键归一：把带实例 ID 的路径折叠成模板，否则 /v1/raw/{id}/{文件名}、
+-- /v1/ai/{id}、/v1/admin/ai/analyses/{cacheKey} 会各占一个 Top 键，
+-- top_n 的榜单被实例变体打散。口径与后端 TelemetryService::cleanEndpoint 一致：
+-- ID = 1 位存储标识 + 6 位随机字符（见 config id.length / characters）。
+local function is_id_segment(seg)
+    if #seg ~= 7 then return false end
+    if not seg:match("^[%a][%w]+$") then return false end
+    -- 必须含数字：否则 7 位纯英文词（如 tools、restart）会被误折叠
+    return seg:match("%d") ~= nil
+end
+
+local function normalize_endpoint(uri)
+    if uri == nil or uri == "" then return "/" end
+    local out = {}
+    for seg in (uri .. "/"):gmatch("([^/]+)/") do
+        local s = seg
+        if is_id_segment(s) then
+            s = ":id"
+        elseif #s >= 16 and s:match("^[0-9a-fA-F]+$") then
+            -- 分析记录 cacheKey 一类的长十六进制段
+            s = ":hash"
+        end
+        out[#out + 1] = s
+    end
+    return "/" .. table.concat(out, "/")
 end
 
 -- ───────────────────────── 记录 ─────────────────────────
@@ -163,12 +210,15 @@ local function bump_bitmap(d, ip)
     end
 end
 
--- access 阶段记录（仅统计通过 WAF 的请求；排除统计页自身）
+-- log 阶段记录（仅统计通过 WAF 的请求；排除统计页自身、遥测上报与管理后台）
 function _M.record()
     local d = dict()
     if not d then return end
     local uri = ngx.var.uri or "/"
     if excluded(uri) then return end
+    -- CORS 预检不是访问行为（应用层中间件直接短路应答，不进业务），
+    -- 计入会让浏览器流量的请求数结构性翻倍并挤占最近请求列表
+    if (ngx.var.request_method or "") == "OPTIONS" then return end
 
     roll_date(d)
     local bytes = tonumber(ngx.var.bytes_sent) or 0
@@ -213,12 +263,14 @@ local function recent_entries(d, count)
     return out
 end
 
--- 按字段聚合 Top（基于最近 ring_capacity 条，展示口径见 README）
-local function top_from_entries(entries, field, limit)
+-- 按字段聚合 Top（基于最近 ring_capacity 条，展示口径见 README）。
+-- keyfn 可选：把带实例 ID 的路径折叠为模板；只作用于聚合键，ring 条目仍保留原始路径。
+local function top_from_entries(entries, field, limit, keyfn)
     local counts, keys = {}, {}
     for _, e in ipairs(entries) do
         local k = e[field]
-        if k and k ~= "-" then
+        if k and k ~= "-" and k ~= "" then
+            if keyfn then k = keyfn(k) end
             if counts[k] == nil then
                 counts[k] = 0
                 keys[#keys + 1] = k
@@ -263,7 +315,7 @@ local function build_view(d)
         },
         hours = hour_trend(d),
         tops = {
-            endpoints = top_from_entries(entries, "u"),
+            endpoints = top_from_entries(entries, "u", CONFIG.top_n, normalize_endpoint),
             referers = top_from_entries(entries, "r"),
             agents = top_from_entries(entries, "a"),
         },
@@ -424,7 +476,7 @@ footer{margin-top:2rem;padding-top:1rem;border-top:1px solid #e6e8eb;color:#98a1
 <h2>最近 24 小时请求趋势</h2>
 <div class="panel" id="trend"><div class="empty">加载中…</div></div>
 
-<h2>热门端点 <small>最近 1000 条请求</small></h2>
+<h2>热门端点 <small>最近 1000 条通过防护的请求 · 已排除遥测与后台接口 · 路径中的实例 ID 归并为 :id</small></h2>
 <div class="panel" id="endpoints"><div class="empty">加载中…</div></div>
 
 <h2>来源 Top <small>Referer host · 最近 1000 条</small></h2>
@@ -563,5 +615,7 @@ end
 
 _M._mask_ip = mask_ip
 _M._referer_host = referer_host
+-- 测试可见性：热门端点的键归一函数（口径须与后端 cleanEndpoint 保持一致）
+_M._normalize_endpoint = normalize_endpoint
 
 return _M

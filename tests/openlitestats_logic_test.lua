@@ -385,8 +385,12 @@ do
     ok(mod._normalize_endpoint("") == "/", "空路径归一为根")
     request({ uri = "/v1/raw/s123456/main.log" })
     request({ uri = "/v1/raw/fAb12cd/main.log" })
+    request({ uri = "/v1/backups/x" })
     local js2 = stats_json("/stats/data")
     ok(js2 and js2:find("/v1/raw/:id/main.log", 1, true) ~= nil, "Top 以模板为键（实例变体不再打散计数）")
+    -- 数字判定必须落在段内：/v1/backups/x 里的 v1 带数字，若按整条 URI 判数字，
+    -- 7 位纯字母路由 backups 会被误折叠成 :id
+    ok(js2 and js2:find("/v1/backups/x", 1, true) ~= nil, "7 位纯字母段不被同 URI 其他段的数字带偏")
     ok(js2 and js2:find("s123456", 1, true) ~= nil, "最近请求仍保留原始路径便于排查")
     -- 线上样本里出现过 {"k":""}：空串键不得参与 Top 聚合
     ngx.shared.openlitestats:set("ring:0", '{"t":1,"m":"GET","u":"","b":1,"r":"-","a":"-","ip":"1.2.*.*"}')

@@ -6,7 +6,7 @@ main:
         - name: sync to github
           image: tencentcom/git-sync
           settings:
-            target_url: https://github.com/NingZeStudio/OpenLiteStats
+            target_url: https://github.com/anylyralabs/OpenLiteStats
             auth_type: https
             username: qitry
             password: ${GITHUB_TOKEN}
